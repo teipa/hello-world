@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>테트리스</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0b0f1a;
+    font-family: "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+    color: #e8ecf4;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #wrap { text-align: center; }
+  h1 {
+    font-size: 22px; font-weight: 600; letter-spacing: 4px;
+    margin-bottom: 12px; color: #8fb8ff;
+  }
+  #stage { display: flex; gap: 18px; align-items: flex-start; }
+  canvas {
+    background: #060912;
+    border: 1px solid #1d2740;
+    border-radius: 8px;
+    box-shadow: 0 0 40px rgba(80,130,255,0.15);
+    display: block;
+  }
+  #side {
+    width: 150px; text-align: left;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .panel {
+    background: #0e1424;
+    border: 1px solid #1d2740;
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .label { font-size: 11px; letter-spacing: 2px; color: #6c7a99; }
+  .value { font-size: 24px; font-weight: 700; margin-top: 4px; color: #dfe7fb; }
+  #next { display: block; margin: 0 auto; }
+  #hint { margin-top: 14px; font-size: 12px; color: #6c7a99; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>T E T R I S</h1>
+  <div id="stage">
+    <canvas id="board" width="300" height="600"></canvas>
+    <div id="side">
+      <div class="panel">
+        <div class="label">NEXT</div>
+        <canvas id="next" width="120" height="90"></canvas>
+      </div>
+      <div class="panel"><div class="label">SCORE</div><div class="value" id="score">0</div></div>
+      <div class="panel"><div class="label">LINES</div><div class="value" id="lines">0</div></div>
+      <div class="panel"><div class="label">LEVEL</div><div class="value" id="level">1</div></div>
+    </div>
+  </div>
+  <div id="hint">← → 이동 · ↑ 회전 · ↓ 소프트 드롭 · 스페이스 하드 드롭 · P 일시정지 · R 재시작</div>
+</div>
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, CELL = 30;
+  const board = document.getElementById("board");
+  const bctx = board.getContext("2d");
+  const nextCv = document.getElementById("next");
+  const nctx = nextCv.getContext("2d");
+  const elScore = document.getElementById("score");
+  const elLines = document.getElementById("lines");
+  const elLevel = document.getElementById("level");
+
+  // 테트로미노 정의 (회전 상태별 4x4 좌표)
+  const SHAPES = {
+    I: { color: "#3fc8ff", cells: [[1,0],[1,1],[1,2],[1,3]] },
+    O: { color: "#ffd166", cells: [[0,1],[0,2],[1,1],[1,2]] },
+    T: { color: "#a78bfa", cells: [[0,1],[1,0],[1,1],[1,2]] },
+    S: { color: "#06d6a0", cells: [[0,1],[0,2],[1,0],[1,1]] },
+    Z: { color: "#ff5d73", cells: [[0,0],[0,1],[1,1],[1,2]] },
+    J: { color: "#5b8dff", cells: [[0,0],[1,0],[1,1],[1,2]] },
+    L: { color: "#ff924c", cells: [[0,2],[1,0],[1,1],[1,2]] },
+  };
+  const TYPES = Object.keys(SHAPES);
+
+  let grid, current, nextType, bag = [];
+  let score, lines, level, dropMs, dropAcc, lastTime;
+  let paused = false, gameOver = false;
+
+  function emptyGrid() {
+    return Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  }
+
+  // 7-bag 랜덤
+  function nextFromBag() {
+    if (bag.length === 0) {
+      bag = TYPES.slice();
+      for (let i = bag.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [bag[i], bag[j]] = [bag[j], bag[i]];
+      }
+    }
+    return bag.pop();
+  }
+
+  function spawn() {
+    const type = nextType || nextFromBag();
+    nextType = nextFromBag();
+    const shape = SHAPES[type];
+    current = {
+      type,
+      color: shape.color,
+      cells: shape.cells.map(([r, c]) => [r, c]),
+      row: 0,
+      col: 3,
+    };
+    if (collides(current.cells, current.row, current.col)) {
+      gameOver = true;
+    }
+  }
+
+  function collides(cells, row, col) {
+    for (const [r, c] of cells) {
+      const gr = row + r, gc = col + c;
+      if (gc < 0 || gc >= COLS || gr >= ROWS) return true;
+      if (gr >= 0 && grid[gr][gc]) return true;
+    }
+    return false;
+  }
+
+  function rotate(cells) {
+    // 4x4 기준 시계방향 회전: (r,c) -> (c, 3-r)
+    return cells.map(([r, c]) => [c, 3 - r]);
+  }
+
+  function tryRotate() {
+    const rotated = rotate(current.cells);
+    // 간단한 월킥: 제자리 → 좌 → 우 → 2칸
+    for (const dx of [0, -1, 1, -2, 2]) {
+      if (!collides(rotated, current.row, current.col + dx)) {
+        current.cells = rotated;
+        current.col += dx;
+        return;
+      }
+    }
+  }
+
+  function move(dr, dc) {
+    if (!collides(current.cells, current.row + dr, current.col + dc)) {
+      current.row += dr;
+      current.col += dc;
+      return true;
+    }
+    return false;
+  }
+
+  function lockPiece() {
+    for (const [r, c] of current.cells) {
+      const gr = current.row + r, gc = current.col + c;
+      if (gr >= 0) grid[gr][gc] = current.color;
+    }
+    clearLines();
+    spawn();
+  }
+
+  function clearLines() {
+    let cleared = 0;
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (grid[r].every((cell) => cell)) {
+        grid.splice(r, 1);
+        grid.unshift(Array(COLS).fill(null));
+        cleared++;
+        r++; // 같은 행 다시 검사
+      }
+    }
+    if (cleared > 0) {
+      const points = [0, 100, 300, 500, 800][cleared] * level;
+      score += points;
+      lines += cleared;
+      const newLevel = Math.floor(lines / 10) + 1;
+      if (newLevel !== level) {
+        level = newLevel;
+        dropMs = Math.max(80, 800 - (level - 1) * 70);
+      }
+      updateHUD();
+    }
+  }
+
+  function hardDrop() {
+    let dist = 0;
+    while (move(1, 0)) dist++;
+    score += dist * 2;
+    updateHUD();
+    lockPiece();
+  }
+
+  function ghostRow() {
+    let r = current.row;
+    while (!collides(current.cells, r + 1, current.col)) r++;
+    return r;
+  }
+
+  function updateHUD() {
+    elScore.textContent = score;
+    elLines.textContent = lines;
+    elLevel.textContent = level;
+  }
+
+  // ---- 렌더링 ----
+  function drawCell(ctx, x, y, color, ghost) {
+    if (ghost) {
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.35;
+      ctx.strokeRect(x + 1.5, y + 1.5, CELL - 3, CELL - 3);
+      ctx.globalAlpha = 1;
+      return;
+    }
+    ctx.fillStyle = color;
+    ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.fillRect(x + 1, y + 1, CELL - 2, 4);
+  }
+
+  function render() {
+    bctx.clearRect(0, 0, board.width, board.height);
+
+    // 그리드 라인
+    bctx.strokeStyle = "rgba(255,255,255,0.04)";
+    for (let c = 0; c <= COLS; c++) {
+      bctx.beginPath(); bctx.moveTo(c * CELL, 0); bctx.lineTo(c * CELL, ROWS * CELL); bctx.stroke();
+    }
+    for (let r = 0; r <= ROWS; r++) {
+      bctx.beginPath(); bctx.moveTo(0, r * CELL); bctx.lineTo(COLS * CELL, r * CELL); bctx.stroke();
+    }
+
+    // 쌓인 블록
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (grid[r][c]) drawCell(bctx, c * CELL, r * CELL, grid[r][c]);
+      }
+    }
+
+    if (current && !gameOver) {
+      // 고스트(낙하 예상 위치)
+      const gr = ghostRow();
+      for (const [r, c] of current.cells) {
+        drawCell(bctx, (current.col + c) * CELL, (gr + r) * CELL, current.color, true);
+      }
+      // 현재 조각
+      for (const [r, c] of current.cells) {
+        const rr = current.row + r;
+        if (rr >= 0) drawCell(bctx, (current.col + c) * CELL, rr * CELL, current.color);
+      }
+    }
+
+    // 다음 조각
+    nctx.clearRect(0, 0, nextCv.width, nextCv.height);
+    if (nextType) {
+      const sh = SHAPES[nextType];
+      const cs = sh.cells;
+      const minC = Math.min(...cs.map((p) => p[1]));
+      const maxC = Math.max(...cs.map((p) => p[1]));
+      const minR = Math.min(...cs.map((p) => p[0]));
+      const maxR = Math.max(...cs.map((p) => p[0]));
+      const w = (maxC - minC + 1) * 24, h = (maxR - minR + 1) * 24;
+      const ox = (nextCv.width - w) / 2, oy = (nextCv.height - h) / 2;
+      nctx.fillStyle = sh.color;
+      for (const [r, c] of cs) {
+        nctx.fillRect(ox + (c - minC) * 24 + 1, oy + (r - minR) * 24 + 1, 22, 22);
+      }
+    }
+
+    if (paused || gameOver) {
+      bctx.fillStyle = "rgba(6,9,18,0.78)";
+      bctx.fillRect(0, 0, board.width, board.height);
+      bctx.textAlign = "center";
+      bctx.fillStyle = "#e8ecf4";
+      bctx.font = "600 34px 'Segoe UI', sans-serif";
+      bctx.fillText(gameOver ? "GAME OVER" : "PAUSED", board.width / 2, board.height / 2 - 6);
+      bctx.fillStyle = "#8fb8ff";
+      bctx.font = "15px 'Segoe UI', sans-serif";
+      bctx.fillText(gameOver ? "R 키로 다시 시작" : "P 키로 계속", board.width / 2, board.height / 2 + 26);
+      bctx.textAlign = "left";
+    }
+  }
+
+  function loop(time) {
+    if (!lastTime) lastTime = time;
+    const dt = time - lastTime;
+    lastTime = time;
+
+    if (!paused && !gameOver) {
+      dropAcc += dt;
+      if (dropAcc >= dropMs) {
+        dropAcc = 0;
+        if (!move(1, 0)) lockPiece();
+      }
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  function newGame() {
+    grid = emptyGrid();
+    bag = [];
+    nextType = null;
+    score = 0; lines = 0; level = 1;
+    dropMs = 800; dropAcc = 0; lastTime = 0;
+    paused = false; gameOver = false;
+    spawn();
+    updateHUD();
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "r" || e.key === "R") { newGame(); return; }
+    if (e.key === "p" || e.key === "P") {
+      if (!gameOver) paused = !paused;
+      return;
+    }
+    if (paused || gameOver) return;
+
+    switch (e.key) {
+      case "ArrowLeft": move(0, -1); break;
+      case "ArrowRight": move(0, 1); break;
+      case "ArrowDown":
+        if (move(1, 0)) { score += 1; updateHUD(); }
+        break;
+      case "ArrowUp": tryRotate(); break;
+      case " ":
+        e.preventDefault();
+        hardDrop();
+        break;
+    }
+  });
+
+  newGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
